@@ -1,0 +1,23 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Dependency lock (excluded per project preference)
+requirements.txt
+
+# Claude session logs
+.claude/logs/
+
+# Data files
+data/
+
+# Environment / secrets
+.env
+.env.*
+settings.json
+
+# OS
+.DS_Store
+Thumbs.db
