@@ -1,4 +1,9 @@
-"""設定値(仮)。本番値はチームで合わせて調整する。"""
+"""実行基盤(インフラ)の設定値(仮)。本番値はチームで合わせて調整する。
+
+ここはネットワーク/RSSI/kNN/joycon/グリッドなど「実行基盤」の設定に限る。
+ゲームのルールや各エンティティ(ghost/attack/scan)の調整値は domain.py の
+GameSettings 系(DEFAULT_SETTINGS)に置く。
+"""
 from __future__ import annotations
 
 import os
@@ -38,10 +43,8 @@ RSSI_WARMUP_SEC = 3.0
 RSSI_WARMUP_MIN_SAMPLES = 5  # 各ビーコンのバッファに必要な最小サンプル数(<= RSSI_BUFFER_MAXLEN)
 
 # --- ゲームルール ---
-GHOST_HP = 1            # ゴーストの初期体力(ATTACKで1減り、hp<=0で撃破)
-MAX_TURNS = 10          # このターン数に達しても撃破できなければゲームオーバー(敗北)
-ATTACK_LIMIT = 10       # ATTACK魔法の使用回数上限
-SCAN_LIMIT = 10         # SCAN魔法の使用回数上限
+# GHOST_HP / MAX_TURNS / ATTACK_LIMIT / SCAN_LIMIT などのゲームルールは
+# domain.py の DEFAULT_SETTINGS(GameSettings) に移動した。main はそこから注入する。
 
 # --- ゲーム終了演出 (raspi側 ghost_light_raspi.py が使用) ---
 # 終了通知({"type":"result"})を受けたraspiの光り方。ghost_light_raspi.py が

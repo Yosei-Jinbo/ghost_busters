@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import time
 
-from domain import GameState, MagicType, Phase
+from domain import MAGIC_STRATEGIES, GameState, MagicType, Phase
 from motion_input import InputEvent, TurnControlEvent
 from position import PositionEstimator, RSSIBuffer
 from raspi_notifier import RaspiNotifier
@@ -29,8 +29,6 @@ class GameEngine:
         notifier: RaspiNotifier,
         motion_queue: asyncio.Queue[InputEvent],
         max_turns: int,
-        attack_limit: int,
-        scan_limit: int,
         warmup_sec: float,
         warmup_min_samples: int,
         warmup_min_beacons: int,
@@ -46,9 +44,9 @@ class GameEngine:
         # warmup_min_beacons 個そろったら「準備完了」とみなす。
         self.warmup_min_samples = warmup_min_samples
         self.warmup_min_beacons = warmup_min_beacons
-        # 魔法ごとの使用済み回数と上限。上限に達するとその魔法は不発になる。
-        self.magic_used = {MagicType.ATTACK: 0, MagicType.SCAN: 0}
-        self.magic_limit = {MagicType.ATTACK: attack_limit, MagicType.SCAN: scan_limit}
+        # このターンで使用済みの魔法(MagicType)。ターン開始ごとにリセットし、
+        # 各魔法を1ターンにつき1回だけに制限する(2回目以降は不発)。
+        self._used_this_turn: set = set()
 
     async def run(self) -> None:
         await self._warmup()
@@ -99,6 +97,9 @@ class GameEngine:
         self.state.turn += 1
         self.state.phase = Phase.TURN_START
 
+        # このターンの魔法使用状況をリセット(各魔法は1ターンにつき1回)。
+        self._used_this_turn = set()
+
         # 0) ターン開始ごとにraspiのLEDを一旦リセット(消灯)する。
         self.notifier.notify_reset()
 
@@ -106,7 +107,7 @@ class GameEngine:
         self.state.ghost.step(self.state)
 
         # 2) ユーザ位置推定(RSSIバッファのスナップショットから)
-        snapshot = self.buffer.snapshot();
+        snapshot = self.buffer.snapshot()
         pos = self.estimator.estimate(snapshot)
         if pos is not None:
             self.state.player.pos = pos
@@ -149,13 +150,13 @@ class GameEngine:
                 f"ghost={_label(g)} (x={g.x}, y={g.y}) hp={hp}"
             )
 
-        # ターン進行状況と残り魔法回数のステータス行。
-        atk_remain = self.magic_limit[MagicType.ATTACK] - self.magic_used[MagicType.ATTACK]
-        scan_remain = self.magic_limit[MagicType.SCAN] - self.magic_used[MagicType.SCAN]
+        # ターン進行状況と、このターンで各魔法が使用可能か(各ターン1回)を表示。
+        atk = "済" if MagicType.ATTACK in self._used_this_turn else "可"
+        scan = "済" if MagicType.SCAN in self._used_this_turn else "可"
         turns_left = max(0, self.max_turns - self.state.turn)
         print(
             f"  turn {self.state.turn}/{self.max_turns} (残り{turns_left}) | "
-            f"ATTACK残り{atk_remain} / SCAN残り{scan_remain}"
+            f"ATTACK:{atk} / SCAN:{scan} (各ターン1回)"
         )
 
         for y in range(h):
@@ -215,45 +216,23 @@ class GameEngine:
 
     # ---- 魔法: 検出 -> 効果適用 -> raspi通知 を1か所に統合 ----
     def _cast_magic(self, magic: MagicType) -> None:
-        used = self.magic_used.get(magic, 0)
-        limit = self.magic_limit.get(magic, 0)
-        if used >= limit:
-            # 使用回数の上限に達した魔法は不発(効果なし・raspi通知なし)。
-            print(f"  -> {magic.name} は使用回数上限({limit})に達しています")
+        # 各魔法(MagicType)は1ターンにつき1回だけ。将来 ATTACK/SCAN に別戦略を
+        # 導入しても、制限は MagicType 単位なので各種一度きり。2回目以降は不発。
+        if magic in self._used_this_turn:
+            print(f"  -> {magic.name} はこのターンで既に使用済み(不発)")
             return
-        self.magic_used[magic] = used + 1
+        self._used_this_turn.add(magic)
 
-        if magic == MagicType.ATTACK:
-            self._resolve_attack()
-        elif magic == MagicType.SCAN:
-            self._resolve_scan()
-        print(f"     ({magic.name} 残り{limit - self.magic_used[magic]}回)")
+        # 魔法の効果は domain 側の戦略に委譲する(engineは回数管理と送信だけ担当)。
+        result = MAGIC_STRATEGIES[magic].apply(self.state)
+        print(f"  -> {result.message}")
 
-        # 登録raspiへ通知(光らせる等)。
-        self.notifier.notify_magic(magic, payload=self._magic_payload())
-
-    def _resolve_attack(self) -> None:
-        # 現在のマス(プレイヤーの推定セル)にゴーストがいれば体力を1減らす。
-        p = self.state.player.pos
-        ghost = self.state.ghost
-        if p is not None and p == ghost.pos:
-            ghost.hp -= 1
-            print(f"  -> cast ATTACK at {p} (ghost hp={ghost.hp})")
-        else:
-            print(f"  -> cast ATTACK at {p} (同一マスにゴーストなし: 効果なし)")
-
-    def _resolve_scan(self) -> None:
-        # TODO: 例) ゴーストまでの距離/方向を計算してraspiの光に反映する。
-        print(f"  -> cast SCAN (dist={self._distance()})")
-
-    def _magic_payload(self) -> dict:
-        """raspiの光り方を決める情報(距離など)を載せる。"""
-        d = self._distance()
-        return {} if d is None else {"distance": d}
-
-    def _distance(self):
-        p, g = self.state.player.pos, self.state.ghost.pos
-        return None if p is None else p.manhattan(g)
+        # 登録raspiへ通知(光らせる等)。光り方(light)は戦略が決めた state をそのまま送る。
+        # distance も後方互換のため付ける(raspiのフォールバック用)。
+        payload: dict = {"light": result.light.value}
+        if result.distance is not None:
+            payload["distance"] = result.distance
+        self.notifier.notify_magic(magic, payload=payload)
 
     # ---- 勝敗 ----
     def _all_ghosts_defeated(self) -> bool:

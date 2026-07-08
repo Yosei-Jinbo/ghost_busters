@@ -6,7 +6,7 @@ import asyncio
 import json
 import socket
 
-from domain import GameState, Ghost, GridPos, MagicType, Phase
+from domain import BaseGhost, GameState, GridPos, MagicType, Phase
 from engine import GameEngine
 from motion_input import MotionEvent, TurnControlEvent
 from position import RSSIBuffer
@@ -107,7 +107,7 @@ def test_end_to_end_motion_until_capture():
         await q.put(TurnControlEvent("end_turn"))
 
     async def scenario():
-        ghost = Ghost(pos=GridPos(2, 2))
+        ghost = BaseGhost(pos=GridPos(2, 2))
         ghost.step = lambda state: None  # 動かない -> 必ず捕獲できる
         state = GameState(grid_w=5, grid_h=5, ghost=ghost)
         notifier = RecordingNotifier()
@@ -119,8 +119,6 @@ def test_end_to_end_motion_until_capture():
             notifier=notifier,
             motion_queue=q,
             max_turns=10,
-            attack_limit=10,
-            scan_limit=10,
             warmup_sec=0.0,
             warmup_min_samples=1,
             warmup_min_beacons=1,

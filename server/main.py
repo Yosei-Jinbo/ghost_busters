@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 
 import config
-from domain import GameState, Ghost, GridPos
+from domain import DEFAULT_SETTINGS, BaseGhost, GameState, GridPos
 from engine import GameEngine
 from motion_input import InputEvent, JoyconMotionSource
 from position import PositionEstimator, RSSIBuffer
@@ -19,7 +19,9 @@ from rssi_receiver import start_rssi_receiver
 
 async def main() -> None:
     # --- 状態 ---
-    ghost = Ghost(pos=GridPos(config.GRID_W // 2, config.GRID_H // 2), hp=config.GHOST_HP)
+    # グリッドは実行基盤(config, fingerprintレイアウト依存)、ゲームルールは domain(DEFAULT_SETTINGS)。
+    # ゴーストの初期体力は BaseGhost の既定値(hp=1)を使う。
+    ghost = BaseGhost(pos=GridPos(config.GRID_W // 2, config.GRID_H // 2))
     state = GameState(grid_w=config.GRID_W, grid_h=config.GRID_H, ghost=ghost)
 
     # --- 入出力アダプタ ---
@@ -50,9 +52,7 @@ async def main() -> None:
         estimator=estimator,
         notifier=notifier,
         motion_queue=motion_queue,
-        max_turns=config.MAX_TURNS,
-        attack_limit=config.ATTACK_LIMIT,
-        scan_limit=config.SCAN_LIMIT,
+        max_turns=DEFAULT_SETTINGS.max_turns,
         warmup_sec=config.RSSI_WARMUP_SEC,
         warmup_min_samples=config.RSSI_WARMUP_MIN_SAMPLES,
         warmup_min_beacons=config.KNN_MIN_VALID,

@@ -6,7 +6,7 @@
 import asyncio
 import time
 
-from domain import GameState, Ghost, GridPos, MagicType, Phase
+from domain import BaseGhost, GameState, GridPos, MagicType, Phase
 from engine import GameEngine
 from motion_input import MotionEvent, TurnControlEvent
 from position import RSSIBuffer, RSSISample
@@ -44,14 +44,12 @@ def _make_engine(
     player_pos=None,
     ghost_pos=(2, 2),
     max_turns=100,
-    attack_limit=100,
-    scan_limit=100,
     warmup_sec=0.0,
     warmup_min_samples=1,
     warmup_min_beacons=1,
     buffer=None,
 ):
-    ghost = Ghost(pos=GridPos(*ghost_pos))
+    ghost = BaseGhost(pos=GridPos(*ghost_pos))
     state = GameState(grid_w=5, grid_h=5, ghost=ghost)
     notifier = RecordingNotifier()
     engine = GameEngine(
@@ -61,8 +59,6 @@ def _make_engine(
         notifier=notifier,
         motion_queue=asyncio.Queue(),
         max_turns=max_turns,
-        attack_limit=attack_limit,
-        scan_limit=scan_limit,
         warmup_sec=warmup_sec,
         warmup_min_samples=warmup_min_samples,
         warmup_min_beacons=warmup_min_beacons,
@@ -116,11 +112,11 @@ def test_turn_start_prints_user_grid(capsys):
     assert "hp=1" in out  # ゴーストの体力が表示される
     assert "[U]" in out  # ユーザのセルが描画される
     assert "[G]" in out  # ゴーストのセルが描画される
-    # ターン進行と魔法残回数のステータス行。
+    # ターン進行と、このターンで各魔法が使用可能かのステータス行(各ターン1回)。
     assert "turn 1/100" in out
     assert "残り99" in out          # 100 - 1
-    assert "ATTACK残り100" in out
-    assert "SCAN残り100" in out
+    assert "ATTACK:可" in out        # ターン開始直後は未使用
+    assert "SCAN:可" in out
 
 
 def test_print_grid_marks_none_when_no_position(capsys):
@@ -152,15 +148,17 @@ def test_cast_magic_applies_and_notifies_with_distance():
     assert len(notifier.calls) == 1
     magic, payload = notifier.calls[0]
     assert magic == MagicType.SCAN
-    assert payload == {"distance": 3}  # manhattan((0,0),(0,3))
+    # distance=3 -> light "blue"。payload には light と distance の両方が載る。
+    assert payload == {"light": "blue", "distance": 3}  # manhattan((0,0),(0,3))
 
 
-def test_cast_magic_payload_empty_without_player_position():
+def test_cast_magic_payload_light_off_without_player_position():
     engine, notifier = _make_engine(player_pos=None)
     engine.state.player.pos = None
     engine._cast_magic(MagicType.ATTACK)
     _, payload = notifier.calls[0]
-    assert payload == {}
+    # 位置未確定なら distance は付かず、light は off。
+    assert payload == {"light": "off"}
 
 
 # ---- ACTIVE(受付窓: Aボタンで閉じる) ----
@@ -181,11 +179,8 @@ def test_turn_active_processes_motions_until_end_turn():
         )
 
     asyncio.run(scenario())
-    assert [m for m, _ in notifier.calls] == [
-        MagicType.ATTACK,
-        MagicType.SCAN,
-        MagicType.ATTACK,
-    ]
+    # 各魔法は1ターンに1回。2回目のATTACKは不発なので通知は ATTACK, SCAN の2件。
+    assert [m for m, _ in notifier.calls] == [MagicType.ATTACK, MagicType.SCAN]
 
 
 def test_turn_active_ends_on_control_event():
@@ -342,29 +337,42 @@ def test_attack_no_effect_when_player_position_unknown():
     assert engine.state.ghost.hp == 3
 
 
-# ---- 魔法の使用回数上限 ----
-def test_attack_blocked_after_reaching_limit():
-    # ATTACKは attack_limit 回だけ有効。上限後は不発(hp減らず、通知もしない)。
-    engine, notifier = _make_engine(player_pos=(2, 2), ghost_pos=(2, 2), attack_limit=2)
+# ---- 魔法は各ターン各種1回 ----
+def test_attack_blocked_second_time_in_same_turn():
+    # 同一ターンでのATTACK2回目は不発(hp減らず、通知もしない)。
+    engine, notifier = _make_engine(player_pos=(2, 2), ghost_pos=(2, 2))
     engine.state.player.pos = GridPos(2, 2)
     engine.state.ghost.hp = 10
     for _ in range(3):
         engine._cast_magic(MagicType.ATTACK)
-    assert engine.state.ghost.hp == 8  # 2回だけ効いた
-    assert [m for m, _ in notifier.calls] == [MagicType.ATTACK, MagicType.ATTACK]
+    assert engine.state.ghost.hp == 9  # 1回だけ効いた
+    assert [m for m, _ in notifier.calls] == [MagicType.ATTACK]
 
 
-def test_scan_and_attack_limits_are_independent():
-    engine, notifier = _make_engine(player_pos=(2, 2), ghost_pos=(2, 2), attack_limit=1, scan_limit=2)
+def test_attack_and_scan_each_allowed_once_per_turn():
+    # ATTACKとSCANは独立して各1回ずつ使える。2回目以降はそれぞれ不発。
+    engine, notifier = _make_engine(player_pos=(2, 2), ghost_pos=(2, 2))
     engine.state.player.pos = GridPos(2, 2)
     engine.state.ghost.hp = 10
-    engine._cast_magic(MagicType.ATTACK)  # 1回目 OK
-    engine._cast_magic(MagicType.ATTACK)  # 上限超過 -> 不発
-    engine._cast_magic(MagicType.SCAN)    # 1回目 OK
-    engine._cast_magic(MagicType.SCAN)    # 2回目 OK
-    engine._cast_magic(MagicType.SCAN)    # 上限超過 -> 不発
-    kinds = [m for m, _ in notifier.calls]
-    assert kinds == [MagicType.ATTACK, MagicType.SCAN, MagicType.SCAN]
+    engine._cast_magic(MagicType.ATTACK)  # OK
+    engine._cast_magic(MagicType.ATTACK)  # 既に使用 -> 不発
+    engine._cast_magic(MagicType.SCAN)    # OK(ATTACKとは独立)
+    engine._cast_magic(MagicType.SCAN)    # 既に使用 -> 不発
+    assert [m for m, _ in notifier.calls] == [MagicType.ATTACK, MagicType.SCAN]
+
+
+def test_magic_usage_resets_next_turn():
+    # ターンが変わると使用状況がリセットされ、再び各種1回使える。
+    engine, notifier = _make_engine(player_pos=(2, 2), ghost_pos=(2, 2))
+    engine.state.ghost.step = lambda state: None  # ゴーストを(2,2)に固定
+    engine.state.player.pos = GridPos(2, 2)
+    engine.state.ghost.hp = 5
+    engine._cast_magic(MagicType.ATTACK)   # turn A: 命中(5->4)
+    engine._cast_magic(MagicType.ATTACK)   # turn A: 不発
+    asyncio.run(engine._turn_start())      # 次ターン開始 -> リセット(player=(2,2)へ再推定)
+    engine._cast_magic(MagicType.ATTACK)   # turn B: また命中(4->3)
+    assert engine.state.ghost.hp == 3
+    assert [m for m, _ in notifier.calls] == [MagicType.ATTACK, MagicType.ATTACK]
 
 
 # ---- ウォームアップ(turn1前にRSSIバッファが十分たまるまで待つ) ----

@@ -1,6 +1,12 @@
 """ghost_sensehat.py の単体テスト(SenseHat実機なしで発光ロジックを検証)。"""
 import ghost_sensehat
-from ghost_sensehat import distance_to_state, rainbow_pixels, update_sensehat_feedback
+from ghost_light_raspi import extract_light
+from ghost_sensehat import (
+    distance_to_state,
+    rainbow_pixels,
+    update_light_state,
+    update_sensehat_feedback,
+)
 
 
 class FakeSense:
@@ -94,3 +100,30 @@ def test_blink_and_show_message_without_sense_do_nothing():
     # 実機なし(None)でも例外を出さない。
     ghost_sensehat.blink(None, "rainbow", 3, 0.1, 0.1)
     ghost_sensehat.show_message(None, "X", [1, 2, 3], 0.1)
+
+
+# ---- サーバ(domain)が決めた light をそのまま描画する経路 ----
+def test_update_light_state_renders_given_state():
+    sense = FakeSense()
+    state = update_light_state(sense, "blue", last_state=None)
+    assert state == "blue"
+    assert sense.calls == [("clear", ((0, 0, 255),))]
+
+
+def test_update_light_state_skips_redraw_when_unchanged():
+    sense = FakeSense()
+    first = update_light_state(sense, "green", last_state=None)
+    second = update_light_state(sense, "green", last_state=first)
+    assert first == second == "green"
+    assert sense.calls == [("clear", ((0, 255, 0),))]  # 2回目は描画されない
+
+
+def test_extract_light_prefers_valid_state():
+    assert extract_light({"light": "rainbow"}) == "rainbow"
+    assert extract_light({"light": "off"}) == "off"
+
+
+def test_extract_light_rejects_unknown_or_missing():
+    assert extract_light({"light": "chartreuse"}) is None  # 未知の状態名
+    assert extract_light({"distance": 2}) is None           # light欠落
+    assert extract_light({"light": 3}) is None              # 型不正

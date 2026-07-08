@@ -89,17 +89,25 @@ def render_state(sense, state: str) -> None:
         sense.clear()
 
 
-def update_sensehat_feedback(sense, distance: Optional[int], last_state: Optional[str]) -> str:
-    """ゴーストとの距離に応じてSense HATを更新し、新しい状態名を返す。
+def update_light_state(sense, state: str, last_state: Optional[str]) -> str:
+    """発光状態名を直接受け取ってSense HATを更新し、その状態名を返す。
 
-    直前と同じ状態なら再描画しない(ちらつき防止)。返り値を次回の last_state に渡す。
-    sense が None(実機なし)でも状態遷移だけは計算して返す。
+    直前と同じ状態なら再描画しない(ちらつき防止)。サーバ(domain)が決めた
+    light 状態をそのまま描画する経路で使う。sense が None でも状態名は返す。
     """
-    state = distance_to_state(distance)
     if state == last_state:
         return state
     render_state(sense, state)
     return state
+
+
+def update_sensehat_feedback(sense, distance: Optional[int], last_state: Optional[str]) -> str:
+    """ゴーストとの距離に応じてSense HATを更新し、新しい状態名を返す。
+
+    距離->状態へ変換したうえで update_light_state に委譲する(後方互換の経路)。
+    sense が None(実機なし)でも状態遷移だけは計算して返す。
+    """
+    return update_light_state(sense, distance_to_state(distance), last_state)
 
 
 def blink(sense, state: str, times: int, on_sec: float, off_sec: float) -> None:

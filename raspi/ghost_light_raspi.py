@@ -3,9 +3,10 @@
 ゲームPC(`engine` -> `raspi_notifier`)が送るUDP通知の `distance` を読み取り、
 `ghost_sensehat` の発光ロジックでSense HATを光らせる。ゴーストに近いほど派手に光る。
 
-受信フォーマット(例): {"type": "magic", "magic": "SCAN", "distance": 3}
-  `distance` フィールドを持つパケットで発光を更新する。`distance` が無い/推定不可の
-  パケット(distance欠落)は消灯側に倒す。壊れたパケットは無視する。
+受信フォーマット(例): {"type": "magic", "magic": "SCAN", "light": "blue", "distance": 3}
+  `light`(発光状態名: rainbow/red/green/blue/off)があればそれをそのまま描画する
+  (光り方の判定はサーバ側 domain が持つ)。`light` が無ければ従来どおり `distance`
+  から発光を更新する。どちらも無い/推定不可なら消灯側に倒す。壊れたパケットは無視する。
   `{"type": "reset"}` で消灯、`{"type": "result", "result": "clear"|"over"}` で
   終了演出(clear=虹色点滅 / over="GAME OVER"スクロール表示)を行う。
 
@@ -51,6 +52,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+_VALID_LIGHT_STATES = {"rainbow", "red", "green", "blue", "off"}
+
+
 def extract_distance(msg: dict) -> Optional[int]:
     """UDPメッセージから distance(int) を取り出す。無い/不正なら None。"""
     d = msg.get("distance")
@@ -60,6 +64,18 @@ def extract_distance(msg: dict) -> Optional[int]:
         return int(d)
     except (TypeError, ValueError):
         return None
+
+
+def extract_light(msg: dict) -> Optional[str]:
+    """UDPメッセージから light(発光状態名) を取り出す。無い/未知なら None。
+
+    サーバ(domain)側が光り方を決めて送るのが本流。値が既知の状態名でなければ
+    None を返し、呼び出し側は distance ベースのフォールバックに倒す。
+    """
+    light = msg.get("light")
+    if isinstance(light, str) and light in _VALID_LIGHT_STATES:
+        return light
+    return None
 
 
 def main() -> None:
@@ -109,9 +125,15 @@ def main() -> None:
                     )
                 last_state = None
                 continue
-            distance = extract_distance(msg)
-            last_state = ghost_sensehat.update_sensehat_feedback(sense, distance, last_state)
-            logger.info("distance=%s -> %s", distance, last_state)
+            # 光り方は domain が決めた light をそのまま使う。無ければ distance から求める。
+            light = extract_light(msg)
+            if light is not None:
+                last_state = ghost_sensehat.update_light_state(sense, light, last_state)
+                logger.info("light=%s -> %s", light, last_state)
+            else:
+                distance = extract_distance(msg)
+                last_state = ghost_sensehat.update_sensehat_feedback(sense, distance, last_state)
+                logger.info("distance=%s -> %s", distance, last_state)
     except KeyboardInterrupt:
         logger.info("stopped")
     finally:
