@@ -3,12 +3,13 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.ruff_cache
 
 # Dependency lock (excluded per project preference)
 requirements.txt
 
 # Claude session logs
-.claude/logs/
+.claude/
 
 # Data files
 data/
