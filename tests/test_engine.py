@@ -6,7 +6,7 @@
 import asyncio
 import time
 
-from domain import BaseGhost, GameState, GridPos, MagicType, Phase
+from domain import BaseGhost, GameSettings, GameState, GridPos, MagicType, Phase
 from engine import GameEngine
 from motion_input import MotionEvent, TurnControlEvent
 from position import RSSIBuffer, RSSISample
@@ -48,6 +48,8 @@ def _make_engine(
     warmup_min_samples=1,
     warmup_min_beacons=1,
     buffer=None,
+    magic_uses_per_turn=None,
+    magic_uses_per_game=None,
 ):
     ghost = BaseGhost(pos=GridPos(*ghost_pos))
     state = GameState(grid_w=5, grid_h=5, ghost=ghost)
@@ -62,6 +64,8 @@ def _make_engine(
         warmup_sec=warmup_sec,
         warmup_min_samples=warmup_min_samples,
         warmup_min_beacons=warmup_min_beacons,
+        magic_uses_per_turn=magic_uses_per_turn,
+        magic_uses_per_game=magic_uses_per_game,
     )
     return engine, notifier
 
@@ -112,11 +116,11 @@ def test_turn_start_prints_user_grid(capsys):
     assert "hp=1" in out  # ゴーストの体力が表示される
     assert "[U]" in out  # ユーザのセルが描画される
     assert "[G]" in out  # ゴーストのセルが描画される
-    # ターン進行と、このターンで各魔法が使用可能かのステータス行(各ターン1回)。
+    # ターン進行と、このターンの各魔法の残り使用回数のステータス行(既定は各1回)。
     assert "turn 1/100" in out
     assert "残り99" in out          # 100 - 1
-    assert "ATTACK:可" in out        # ターン開始直後は未使用
-    assert "SCAN:可" in out
+    assert "ATTACK:残1" in out       # ターン開始直後は未使用
+    assert "SCAN:残1" in out
 
 
 def test_print_grid_marks_none_when_no_position(capsys):
@@ -359,6 +363,57 @@ def test_attack_and_scan_each_allowed_once_per_turn():
     engine._cast_magic(MagicType.SCAN)    # OK(ATTACKとは独立)
     engine._cast_magic(MagicType.SCAN)    # 既に使用 -> 不発
     assert [m for m, _ in notifier.calls] == [MagicType.ATTACK, MagicType.SCAN]
+
+
+def test_magic_uses_per_turn_is_configurable():
+    # GameSettings で上限を変えると、1ターンに複数回使える(上限超過は不発)。
+    settings = GameSettings(attack_uses_per_turn=2, scan_uses_per_turn=3)
+    engine, notifier = _make_engine(
+        player_pos=(2, 2), ghost_pos=(2, 2),
+        magic_uses_per_turn=settings.magic_uses_per_turn(),
+    )
+    engine.state.player.pos = GridPos(2, 2)
+    engine.state.ghost.hp = 10
+    for _ in range(4):
+        engine._cast_magic(MagicType.ATTACK)  # 2回まで有効
+    for _ in range(4):
+        engine._cast_magic(MagicType.SCAN)    # 3回まで有効
+    assert engine.state.ghost.hp == 8  # ATTACKは2回だけ効いた
+    magics = [m for m, _ in notifier.calls]
+    assert magics.count(MagicType.ATTACK) == 2
+    assert magics.count(MagicType.SCAN) == 3
+
+
+def test_magic_uses_per_game_limits_total_uses_across_turns():
+    # ゲーム全体の上限を使い切ると、ターンが変わっても不発のまま。
+    settings = GameSettings(scan_uses_per_game=2)
+    engine, notifier = _make_engine(
+        player_pos=(2, 2), ghost_pos=(2, 2),
+        magic_uses_per_game=settings.magic_uses_per_game(),
+    )
+    engine.state.ghost.step = lambda state: None
+    engine.state.player.pos = GridPos(2, 2)
+    for _ in range(4):  # 4ターンで毎ターンSCANを試みる(有効なのは最初の2回)
+        engine._cast_magic(MagicType.SCAN)
+        asyncio.run(engine._turn_start())
+    magics = [m for m, _ in notifier.calls]
+    assert magics.count(MagicType.SCAN) == 2
+
+
+def test_magic_game_limit_applies_within_single_turn():
+    # ターン内上限を大きくしても、ゲーム全体の上限が先に尽きればそこで不発。
+    settings = GameSettings(attack_uses_per_turn=10, attack_uses_per_game=3)
+    engine, notifier = _make_engine(
+        player_pos=(2, 2), ghost_pos=(2, 2),
+        magic_uses_per_turn=settings.magic_uses_per_turn(),
+        magic_uses_per_game=settings.magic_uses_per_game(),
+    )
+    engine.state.player.pos = GridPos(2, 2)
+    engine.state.ghost.hp = 10
+    for _ in range(5):
+        engine._cast_magic(MagicType.ATTACK)
+    assert engine.state.ghost.hp == 7  # 3回だけ効いた
+    assert [m for m, _ in notifier.calls].count(MagicType.ATTACK) == 3
 
 
 def test_magic_usage_resets_next_turn():

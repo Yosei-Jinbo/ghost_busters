@@ -4,17 +4,18 @@ import random
 from domain import (
     DEFAULT_SETTINGS,
     GHOST_REGISTRY,
-    MAGIC_STRATEGIES,
-    AttackSettings,
     BaseAttack,
     BaseGhost,
     BaseScan,
+    FlyGhost,
     GameState,
     GridPos,
     LightState,
     MagicType,
     Phase,
     Player,
+    SlowGhost,
+    build_magic_strategies,
     light_for_distance,
 )
 
@@ -131,25 +132,72 @@ def test_scan_on_same_cell_is_hit_and_rainbow():
 
 
 # ---- レジストリ登録(現在の実装が Base として登録済み) ----
-def test_base_ghost_registered():
+def test_ghosts_registered():
     assert GHOST_REGISTRY["base"] is BaseGhost
+    assert GHOST_REGISTRY["slow"] is SlowGhost
+    assert GHOST_REGISTRY["fly"] is FlyGhost
 
 
 def test_base_magic_strategies_registered():
-    # 各 MagicType に対応する戦略インスタンスが登録されている。
-    assert isinstance(MAGIC_STRATEGIES[MagicType.ATTACK], BaseAttack)
-    assert isinstance(MAGIC_STRATEGIES[MagicType.SCAN], BaseScan)
+    # 各 MagicType に対応する戦略インスタンスが組み立てられる。
+    strategies = build_magic_strategies(DEFAULT_SETTINGS)
+    assert isinstance(strategies[MagicType.ATTACK], BaseAttack)
+    assert isinstance(strategies[MagicType.SCAN], BaseScan)
 
 
 # ---- ゲーム設定(domain.py に集約) ----
 def test_default_settings_values():
     assert DEFAULT_SETTINGS.max_turns == 10
-    assert DEFAULT_SETTINGS.attack.damage == 1
+    assert DEFAULT_SETTINGS.ghost_type == "base"
+    assert DEFAULT_SETTINGS.attack_uses_per_turn == 1
+    assert DEFAULT_SETTINGS.scan_uses_per_turn == 1
+    assert DEFAULT_SETTINGS.attack_uses_per_game == 10
+    assert DEFAULT_SETTINGS.scan_uses_per_game == 10
 
 
-def test_attack_uses_configured_damage():
-    # AttackSettings.damage を変えると命中時の体力減少量が変わる。
-    state = _state_with_player(gx=2, gy=2, px=2, py=2, hp=5)
-    result = BaseAttack(AttackSettings(damage=3)).apply(state)
-    assert result.hit is True
-    assert state.ghost.hp == 2  # 5 - 3
+# ---- FlyGhost: 同列・同行のマスへ等確率で移動する / 体力2 ----
+def test_fly_ghost_default_hp_is_2():
+    g = FlyGhost(pos=GridPos(0, 0))
+    assert g.hp == 2
+
+
+def test_fly_ghost_moves_within_same_row_or_column():
+    random.seed(0)
+    state = GameState(grid_w=5, grid_h=5, ghost=FlyGhost(pos=GridPos(2, 2)))
+    for _ in range(500):
+        before = GridPos(state.ghost.pos.x, state.ghost.pos.y)
+        state.ghost.step(state)
+        after = state.ghost.pos
+        # 移動先は元の位置と同じ行または同じ列(その場に留まる場合を含む)
+        assert after.x == before.x or after.y == before.y
+        assert 0 <= after.x < state.grid_w
+        assert 0 <= after.y < state.grid_h
+
+
+def test_fly_ghost_covers_all_row_and_column_cells():
+    # 位置を毎回 (2,2) に固定して移動先の分布を確認:
+    # 同列・同行の8マス + 現在地(留まる)の計9マス全てに到達する。
+    random.seed(0)
+    state = GameState(grid_w=5, grid_h=5, ghost=FlyGhost(pos=GridPos(2, 2)))
+    destinations = set()
+    for _ in range(500):
+        state.ghost.pos = GridPos(2, 2)
+        state.ghost.step(state)
+        destinations.add((state.ghost.pos.x, state.ghost.pos.y))
+    expected = {(x, 2) for x in range(5)} | {(2, y) for y in range(5)}
+    assert destinations == expected
+
+
+# ---- SlowGhost: 3ターンに1回だけ移動する ----
+def test_slow_ghost_moves_every_third_turn():
+    random.seed(0)
+    state = GameState(grid_w=10, grid_h=10, ghost=SlowGhost(pos=GridPos(5, 5)))
+    for turn in range(12):
+        state.turn = turn
+        before = GridPos(state.ghost.pos.x, state.ghost.pos.y)
+        state.ghost.step(state)
+        moved = before.manhattan(state.ghost.pos) > 0
+        if (turn + 1) % 3 == 0:
+            assert moved, f"turn={turn}: 3の倍数ターンでは移動するはず"
+        else:
+            assert not moved, f"turn={turn}: 待機ターンでは移動しないはず"

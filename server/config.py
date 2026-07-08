@@ -66,7 +66,7 @@ SHAKE_THRESHOLD = 2000           # 振り検知に使う加速度差の閾値(di
 # ゲームPCはBLEを自分でスキャンしない。fingerprint CSVもraspiが収集したものを使う。
 # data/ ディレクトリのフィンガープリントCSV(collect_phone_uuid_fingerprint.py(raspi側)の出力)。
 # CWDに依存しないよう絶対パスで解決する。
-FINGERPRINT_CSV = os.path.join(_REPO_ROOT, "data", "phone_fingerprint_0624_10s_3.csv")
+FINGERPRINT_CSV = os.path.join(_REPO_ROOT, "data", "phone_fingerprint_0708.csv")
 KNN_K = 5               # 多数決に使う近傍数
 KNN_MIN_VALID = 8       # 距離計算に必要な共通ビーコンの最小数
 KNN_WEIGHTED_VOTE = False  # True で逆距離重み付き投票

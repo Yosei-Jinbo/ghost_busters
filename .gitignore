@@ -21,3 +21,9 @@ settings.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Virtualenv
+venv/
+
+# Claude local settings
+.claude/settings.local.json

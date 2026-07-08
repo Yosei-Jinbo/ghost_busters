@@ -106,6 +106,7 @@ def main() -> None:
                 logger.info("reset -> clear LED")
                 continue
             if msg.get("type") == "result":
+                print(f'GAME FINISH message = {msg.get("type")}')
                 # ゲーム終了演出: clear=虹色点滅 / over=GAME OVER表示(表示中はブロッキング)。
                 if msg.get("result") == "clear":
                     logger.info("GAME CLEAR -> rainbow blink")

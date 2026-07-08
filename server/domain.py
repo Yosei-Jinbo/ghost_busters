@@ -33,20 +33,38 @@ class MagicType(Enum):
 
 
 @dataclass(frozen=True)
-class AttackSettings:
-    """BaseAttack の調整値。"""
-    damage: int = 1             # 命中時に減らす体力(BaseAttackが使用)
-
-
-@dataclass(frozen=True)
 class GameSettings:
     """ゲーム全体のルール設定。各エンティティ設定を束ねる。
 
-    ATTACK/SCAN は各ターンにつき各種1回のみ(回数上限の設定は持たず、engineが制御)。
-    ゴーストの初期体力は BaseGhost 側の既定値(hp=1)を使う。
+    ATTACK/SCAN の1ターンあたりの使用回数は attack_uses_per_turn /
+    scan_uses_per_turn、ゲーム全体での使用回数は attack_uses_per_game /
+    scan_uses_per_game で設定する(制限の実施は engine が担当)。
+    ゴーストの初期体力は各ゴーストクラス側の既定値を使う(base/slow: hp=1, fly: hp=2)。
+    ghost_type / attack_type / scan_type は各レジストリの登録名で、
+    どの実装を使うかをここで選ぶ(main が create_ghost / build_magic_strategies で解決)。
     """
-    max_turns: int = 10         # このターン数で撃破できなければ敗北
-    attack: AttackSettings = field(default_factory=AttackSettings)
+    max_turns: int = 10             # このターン数で撃破できなければ敗北
+    ghost_type: str = "base"        # GHOST_REGISTRY の登録名 ("base" / "slow" / "fly")
+    attack_type: str = "base"       # MAGIC_REGISTRY[ATTACK] の登録名
+    scan_type: str = "base"         # MAGIC_REGISTRY[SCAN] の登録名
+    attack_uses_per_turn: int = 1   # ATTACK を1ターンに使える回数
+    scan_uses_per_turn: int = 1     # SCAN を1ターンに使える回数
+    attack_uses_per_game: int = 10  # ATTACK をゲーム中に使える総回数
+    scan_uses_per_game: int = 10    # SCAN をゲーム中に使える総回数
+
+    def magic_uses_per_turn(self) -> Dict[MagicType, int]:
+        """魔法種別ごとの1ターンあたり使用回数(engineへの注入用)。"""
+        return {
+            MagicType.ATTACK: self.attack_uses_per_turn,
+            MagicType.SCAN: self.scan_uses_per_turn,
+        }
+
+    def magic_uses_per_game(self) -> Dict[MagicType, int]:
+        """魔法種別ごとのゲーム全体での使用回数上限(engineへの注入用)。"""
+        return {
+            MagicType.ATTACK: self.attack_uses_per_game,
+            MagicType.SCAN: self.scan_uses_per_game,
+        }
 
 
 # 既定のゲーム設定。main はここから各値を取り出して各アダプタへ注入する。
@@ -75,27 +93,87 @@ def register_ghost(name: str) -> Callable[[Type["BaseGhost"]], Type["BaseGhost"]
         return cls
     return decorator
 
-
 @register_ghost("base")
 @dataclass
 class BaseGhost:
-    """ゴーストの基本実装(現状=グリッド内ランダムウォーク)。
-
-    将来の亜種はこれを継承し register_ghost で別名登録する。位置のみを持つが、
-    HP・種類・行動パターンなどをこのクラス系統に足していける。
-    """
+    """ゴーストの基本実装。"""
     pos: GridPos
     ghost_id: int = 0
     hp: int = 1
-    # 行動ロジックは step() の差し替え、または Strategy への切り出しで拡張可能。
+    # 待機ターン数（0を指定すると毎ターン動く）
+    wait_turns: int = 0
 
     def step(self, state: GameState) -> None:
-        """ターン開始時の移動。スケルトン: グリッド内ランダムウォーク。"""
-        dx, dy = random.choice([(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)])
+        """ターン開始時の移動。待機ターン経過後に移動する。"""
+        
+        # 行動の周期は「待機ターン数 + 1（移動するターン）」
+        cycle = self.wait_turns + 1
+        
+        # 現在のターンが行動周期でない場合は、移動処理をスキップして終了
+        if (state.turn + 1) % cycle != 0:
+            return
+
+        excepted_step_list = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        valid_step_list = []
+        for (dx, dy) in excepted_step_list:
+            if state.grid_w - 1 < dx + self.pos.x or dx + self.pos.x < 0:
+                continue
+            if state.grid_h - 1 < dy + self.pos.y or dy + self.pos.y < 0:
+                continue
+            valid_step_list.append((dx, dy))
+            
+        # 💡 フェイルセーフ：四方を完全に壁に囲まれていて動ける場所がない場合のクラッシュ防止
+        if not valid_step_list:
+            return
+
+        dx, dy = random.choice(valid_step_list)
         self.pos = GridPos(
             max(0, min(state.grid_w - 1, self.pos.x + dx)),
             max(0, min(state.grid_h - 1, self.pos.y + dy)),
         )
+
+
+@register_ghost("slow")
+@dataclass
+class SlowGhost(BaseGhost):
+    """3ターンに1回だけ移動する遅いゴースト(2ターン待機 + 1ターン移動)。"""
+    wait_turns: int = 2
+
+
+@register_ghost("fly")
+@dataclass
+class FlyGhost(BaseGhost):
+    """同じ行・同じ列の任意のマスへ等確率で移動する、体力2のゴースト。"""
+    hp: int = 2
+
+    def step(self, state: GameState) -> None:
+        """ターン開始時の移動。現在地と同列・同行のマス(現在地を除く)から等確率で選ぶ。"""
+        cycle = self.wait_turns + 1
+        if (state.turn + 1) % cycle != 0:
+            return
+
+        candidates = [
+            GridPos(x, self.pos.y) for x in range(state.grid_w) if x != self.pos.x
+        ] + [
+            GridPos(self.pos.x, y) for y in range(state.grid_h) if y != self.pos.y
+        ] + [GridPos(self.pos.x, self.pos.y)]
+
+        # 1x1グリッドなど移動先がない場合は何もしない
+        if not candidates:
+            return
+
+        self.pos = random.choice(candidates)
+
+
+def create_ghost(settings: GameSettings, pos: GridPos) -> BaseGhost:
+    """settings.ghost_type で選ばれたゴーストを生成する(main が使う入口)。"""
+    cls = GHOST_REGISTRY.get(settings.ghost_type)
+    if cls is None:
+        raise ValueError(
+            f"未登録のゴースト種別: {settings.ghost_type!r} "
+            f"(登録済み: {sorted(GHOST_REGISTRY)})"
+        )
+    return cls(pos=pos)
 
 
 @dataclass
@@ -156,8 +234,9 @@ def light_for_distance(distance: Optional[int]) -> LightState:
 # 魔法1種 = 1戦略。1つのストラテジが「何をヒットとするか・ヒット時の効果・
 # どう光らせるか」までを閉じて持ち、結果を純粋データ(MagicResult)で返す。
 # raspi送信(UDP)は含めない: domain はデバイス非依存を保ち、送信は engine 側が
-# MagicResult を見て行う。現在の実装は BaseAttack / BaseScan として登録済み。
-# 新しい魔法は MagicStrategy を継承し register_magic で登録するだけ。
+# MagicResult を見て行う。現在の実装は BaseAttack / BaseScan("base")として登録済み。
+# 新しい戦略は MagicStrategy を継承し register_magic(MagicType, 名前) で登録し、
+# GameSettings.attack_type / scan_type にその名前を指定すると差し替わる。
 
 
 @dataclass(frozen=True)
@@ -178,36 +257,63 @@ class MagicStrategy(ABC):
         ...
 
 
-# 魔法種別 -> 戦略インスタンスのレジストリ。register_magic で登録し、engine はここを引く。
-MAGIC_STRATEGIES: Dict[MagicType, MagicStrategy] = {}
+# 魔法種別 -> {登録名 -> 戦略クラス} のレジストリ。register_magic で登録し、
+# main が build_magic_strategies(settings) で使用実装を選んで engine に注入する。
+MAGIC_REGISTRY: Dict[MagicType, Dict[str, Type[MagicStrategy]]] = {
+    m: {} for m in MagicType
+}
 
 
 def register_magic(
-    magic: MagicType,
+    magic: MagicType, name: str,
 ) -> Callable[[Type[MagicStrategy]], Type[MagicStrategy]]:
-    """魔法の戦略を MagicType に紐付けて登録するデコレータ(インスタンスを1つ登録)。"""
+    """魔法の戦略クラスを (MagicType, 登録名) で登録するデコレータ。"""
     def decorator(cls: Type[MagicStrategy]) -> Type[MagicStrategy]:
-        MAGIC_STRATEGIES[magic] = cls()
+        MAGIC_REGISTRY[magic][name] = cls
         return cls
     return decorator
 
 
-@register_magic(MagicType.ATTACK)
+def _resolve_magic(magic: MagicType, name: str) -> Type[MagicStrategy]:
+    """レジストリから登録名で戦略クラスを引く。未登録なら ValueError。"""
+    cls = MAGIC_REGISTRY[magic].get(name)
+    if cls is None:
+        raise ValueError(
+            f"未登録の{magic.name}戦略: {name!r} "
+            f"(登録済み: {sorted(MAGIC_REGISTRY[magic])})"
+        )
+    return cls
+
+
+def build_magic_strategies(
+    settings: GameSettings = DEFAULT_SETTINGS,
+) -> Dict[MagicType, MagicStrategy]:
+    """settings の attack_type / scan_type で選んだ戦略インスタンスを組み立てる。
+
+    生成規約: ATTACK系/SCAN系ともコンストラクタは引数なし
+    (調整値が必要になったら settings を追加して揃える)。
+    """
+    attack_cls = _resolve_magic(MagicType.ATTACK, settings.attack_type)
+    scan_cls = _resolve_magic(MagicType.SCAN, settings.scan_type)
+    return {
+        MagicType.ATTACK: attack_cls(),
+        MagicType.SCAN: scan_cls(),
+    }
+
+
+@register_magic(MagicType.ATTACK, "base")
 class BaseAttack(MagicStrategy):
     """ATTACKの基本実装。ヒット条件: プレイヤーの推定セルがゴーストと同一。
-    ヒット時の効果: ゴーストの体力を settings.damage 減らす。光り方: 捕獲を表す RAINBOW。
+    ヒット時の効果: ゴーストの体力を1減らす。光り方: 捕獲を表す RAINBOW。
     外れたときは現在の近さを示す距離ベースの光にする。
     """
-
-    def __init__(self, settings: AttackSettings = DEFAULT_SETTINGS.attack) -> None:
-        self.settings = settings
 
     def apply(self, state: GameState) -> MagicResult:
         p, ghost = state.player.pos, state.ghost
         dist = state.distance()
         hit = p is not None and p == ghost.pos
         if hit:
-            ghost.hp -= self.settings.damage
+            ghost.hp -= 1
             return MagicResult(
                 MagicType.ATTACK, hit=True, distance=dist, light=LightState.RAINBOW,
                 message=f"cast ATTACK at {p} (命中! ghost hp={ghost.hp})",
@@ -218,7 +324,7 @@ class BaseAttack(MagicStrategy):
         )
 
 
-@register_magic(MagicType.SCAN)
+@register_magic(MagicType.SCAN, "base")
 class BaseScan(MagicStrategy):
     """SCANの基本実装。ヒット条件: ゴーストと同一セル(距離0=発見)。
     効果: 状態は変えない(探索のみ)。光り方: ゴーストへの近さを距離ベースの光で示す。

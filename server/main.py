@@ -9,7 +9,13 @@ from __future__ import annotations
 import asyncio
 
 import config
-from domain import DEFAULT_SETTINGS, BaseGhost, GameState, GridPos
+from domain import (
+    DEFAULT_SETTINGS,
+    GameState,
+    GridPos,
+    build_magic_strategies,
+    create_ghost,
+)
 from engine import GameEngine
 from motion_input import InputEvent, JoyconMotionSource
 from position import PositionEstimator, RSSIBuffer
@@ -20,8 +26,9 @@ from rssi_receiver import start_rssi_receiver
 async def main() -> None:
     # --- 状態 ---
     # グリッドは実行基盤(config, fingerprintレイアウト依存)、ゲームルールは domain(DEFAULT_SETTINGS)。
-    # ゴーストの初期体力は BaseGhost の既定値(hp=1)を使う。
-    ghost = BaseGhost(pos=GridPos(config.GRID_W // 2, config.GRID_H // 2))
+    # ゴースト/ATTACK/SCAN の実装は settings の ghost_type/attack_type/scan_type で選ぶ。
+    settings = DEFAULT_SETTINGS
+    ghost = create_ghost(settings, GridPos(config.GRID_W // 2, config.GRID_H // 2))
     state = GameState(grid_w=config.GRID_W, grid_h=config.GRID_H, ghost=ghost)
 
     # --- 入出力アダプタ ---
@@ -52,10 +59,13 @@ async def main() -> None:
         estimator=estimator,
         notifier=notifier,
         motion_queue=motion_queue,
-        max_turns=DEFAULT_SETTINGS.max_turns,
+        max_turns=settings.max_turns,
         warmup_sec=config.RSSI_WARMUP_SEC,
         warmup_min_samples=config.RSSI_WARMUP_MIN_SAMPLES,
         warmup_min_beacons=config.KNN_MIN_VALID,
+        strategies=build_magic_strategies(settings),
+        magic_uses_per_turn=settings.magic_uses_per_turn(),
+        magic_uses_per_game=settings.magic_uses_per_game(),
     )
 
     # --- RSSI受信を常駐起動 (UDP: 中継raspiが測定した生RSSIを受信) ---

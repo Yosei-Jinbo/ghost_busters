@@ -13,8 +13,16 @@ from __future__ import annotations
 
 import asyncio
 import time
+from typing import Dict, Optional
 
-from domain import MAGIC_STRATEGIES, GameState, MagicType, Phase
+from domain import (
+    DEFAULT_SETTINGS,
+    GameState,
+    MagicStrategy,
+    MagicType,
+    Phase,
+    build_magic_strategies,
+)
 from motion_input import InputEvent, TurnControlEvent
 from position import PositionEstimator, RSSIBuffer
 from raspi_notifier import RaspiNotifier
@@ -32,6 +40,9 @@ class GameEngine:
         warmup_sec: float,
         warmup_min_samples: int,
         warmup_min_beacons: int,
+        strategies: Optional[Dict[MagicType, MagicStrategy]] = None,
+        magic_uses_per_turn: Optional[Dict[MagicType, int]] = None,
+        magic_uses_per_game: Optional[Dict[MagicType, int]] = None,
     ) -> None:
         self.state = state
         self.buffer = buffer
@@ -44,9 +55,30 @@ class GameEngine:
         # warmup_min_beacons 個そろったら「準備完了」とみなす。
         self.warmup_min_samples = warmup_min_samples
         self.warmup_min_beacons = warmup_min_beacons
-        # このターンで使用済みの魔法(MagicType)。ターン開始ごとにリセットし、
-        # 各魔法を1ターンにつき1回だけに制限する(2回目以降は不発)。
-        self._used_this_turn: set = set()
+        # 使用する魔法戦略。main が domain の設定(attack_type/scan_type)から
+        # 組み立てて注入する。未指定なら既定設定(DEFAULT_SETTINGS)で組み立てる。
+        self.strategies = (
+            strategies if strategies is not None else build_magic_strategies()
+        )
+        # 魔法種別ごとの1ターンあたり使用回数上限。main が domain の設定
+        # (attack_uses_per_turn/scan_uses_per_turn)から注入する。未指定なら既定設定。
+        self.magic_uses_per_turn = (
+            magic_uses_per_turn
+            if magic_uses_per_turn is not None
+            else DEFAULT_SETTINGS.magic_uses_per_turn()
+        )
+        # 魔法種別ごとのゲーム全体での使用回数上限。同じく main が注入する。
+        self.magic_uses_per_game = (
+            magic_uses_per_game
+            if magic_uses_per_game is not None
+            else DEFAULT_SETTINGS.magic_uses_per_game()
+        )
+        # このターンでの魔法種別ごとの使用回数。ターン開始ごとにリセットし、
+        # 上限(magic_uses_per_turn)に達した魔法は不発にする。
+        self._used_this_turn: Dict[MagicType, int] = {}
+        # ゲーム開始からの魔法種別ごとの累計使用回数。リセットせず、
+        # 上限(magic_uses_per_game)を使い切った魔法は以降のターンでも不発にする。
+        self._used_total: Dict[MagicType, int] = {}
 
     async def run(self) -> None:
         await self._warmup()
@@ -97,8 +129,8 @@ class GameEngine:
         self.state.turn += 1
         self.state.phase = Phase.TURN_START
 
-        # このターンの魔法使用状況をリセット(各魔法は1ターンにつき1回)。
-        self._used_this_turn = set()
+        # このターンの魔法使用回数をリセット(上限は magic_uses_per_turn)。
+        self._used_this_turn = {}
 
         # 0) ターン開始ごとにraspiのLEDを一旦リセット(消灯)する。
         self.notifier.notify_reset()
@@ -150,13 +182,15 @@ class GameEngine:
                 f"ghost={_label(g)} (x={g.x}, y={g.y}) hp={hp}"
             )
 
-        # ターン進行状況と、このターンで各魔法が使用可能か(各ターン1回)を表示。
-        atk = "済" if MagicType.ATTACK in self._used_this_turn else "可"
-        scan = "済" if MagicType.SCAN in self._used_this_turn else "可"
+        # ターン進行状況と、各魔法の残り使用回数(このターン / ゲーム全体)を表示。
+        atk_left = self._uses_left(MagicType.ATTACK)
+        scan_left = self._uses_left(MagicType.SCAN)
+        atk_game = self._game_uses_left(MagicType.ATTACK)
+        scan_game = self._game_uses_left(MagicType.SCAN)
         turns_left = max(0, self.max_turns - self.state.turn)
         print(
             f"  turn {self.state.turn}/{self.max_turns} (残り{turns_left}) | "
-            f"ATTACK:{atk} / SCAN:{scan} (各ターン1回)"
+            f"ATTACK:残{atk_left}(全体残{atk_game}) / SCAN:残{scan_left}(全体残{scan_game})"
         )
 
         for y in range(h):
@@ -215,16 +249,35 @@ class GameEngine:
             self.state.phase = Phase.GAME_OVER
 
     # ---- 魔法: 検出 -> 効果適用 -> raspi通知 を1か所に統合 ----
+    def _uses_left(self, magic: MagicType) -> int:
+        """このターンで magic をあと何回使えるか(既定上限は1回)。"""
+        limit = self.magic_uses_per_turn.get(magic, 1)
+        used = self._used_this_turn.get(magic, 0)
+        return max(0, limit - used)
+
+    def _game_uses_left(self, magic: MagicType) -> int:
+        """ゲーム全体で magic をあと何回使えるか(既定上限は10回)。"""
+        limit = self.magic_uses_per_game.get(magic, 10)
+        used = self._used_total.get(magic, 0)
+        return max(0, limit - used)
+
     def _cast_magic(self, magic: MagicType) -> None:
-        # 各魔法(MagicType)は1ターンにつき1回だけ。将来 ATTACK/SCAN に別戦略を
-        # 導入しても、制限は MagicType 単位なので各種一度きり。2回目以降は不発。
-        if magic in self._used_this_turn:
-            print(f"  -> {magic.name} はこのターンで既に使用済み(不発)")
+        # 各魔法(MagicType)は1ターンにつき magic_uses_per_turn 回まで(既定1回)、
+        # かつゲーム全体で magic_uses_per_game 回まで(既定10回)。
+        # 制限は MagicType 単位なので、別戦略を導入しても種別ごとに数える。
+        if self._game_uses_left(magic) <= 0:
+            limit = self.magic_uses_per_game.get(magic, 10)
+            print(f"  -> {magic.name} はゲーム中の上限({limit}回)を使い切った(不発)")
             return
-        self._used_this_turn.add(magic)
+        if self._uses_left(magic) <= 0:
+            limit = self.magic_uses_per_turn.get(magic, 1)
+            print(f"  -> {magic.name} はこのターンの上限({limit}回)に達している(不発)")
+            return
+        self._used_this_turn[magic] = self._used_this_turn.get(magic, 0) + 1
+        self._used_total[magic] = self._used_total.get(magic, 0) + 1
 
         # 魔法の効果は domain 側の戦略に委譲する(engineは回数管理と送信だけ担当)。
-        result = MAGIC_STRATEGIES[magic].apply(self.state)
+        result = self.strategies[magic].apply(self.state)
         print(f"  -> {result.message}")
 
         # 登録raspiへ通知(光らせる等)。光り方(light)は戦略が決めた state をそのまま送る。
